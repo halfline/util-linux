@@ -64,6 +64,10 @@
 # include <libaudit.h>
 #endif
 
+#ifdef HAVE_LIBSYSTEMD
+# include <systemd/sd-bus.h>
+#endif
+
 #include "c.h"
 #include "setproctitle.h"
 #include "pathnames.h"
@@ -73,6 +77,7 @@
 #include "xalloc.h"
 #include "all-io.h"
 #include "fileutils.h"
+#include "strv.h"
 #include "ttyutils.h"
 
 #include "logindefs.h"
@@ -1021,6 +1026,82 @@ static void fork_session(struct login_context *cxt)
 	signal(SIGINT, SIG_DFL);
 }
 
+#ifdef HAVE_LIBSYSTEMD
+/*
+ * Import environment from systemd user manager
+ */
+static void import_systemd_user_environ(struct login_context *cxt)
+{
+	struct passwd *pwd = cxt->pwd;
+	int rc;
+	sd_bus *bus = NULL;
+	sd_bus_error error = SD_BUS_ERROR_NULL;
+	sd_bus_message *reply = NULL;
+	char *env_entry = NULL;
+	uid_t old_euid = geteuid();
+	int euid_changed = 0;
+
+	if (pwd->pw_uid != 0) {
+		assert(old_euid == getuid());
+
+		if (seteuid(pwd->pw_uid) < 0) {
+			syslog(LOG_ERR, _("seteuid failed: %m"));
+			return;
+		}
+		euid_changed = 1;
+	}
+
+	rc = sd_bus_default_user(&bus);
+
+	if (rc < 0) {
+		syslog(LOG_NOTICE, _("user bus unavailable: %m"));
+		return;
+	}
+
+	rc = sd_bus_get_property(bus,
+				 "org.freedesktop.systemd1",
+				 "/org/freedesktop/systemd1",
+				 "org.freedesktop.systemd1.Manager",
+				 "Environment",
+				 &error,
+				 &reply,
+				 "as");
+
+	if (rc < 0) {
+		syslog(LOG_NOTICE, _("user bus unable to return environment: %m"));
+		goto out;
+	}
+
+	rc = sd_bus_message_enter_container(reply, SD_BUS_TYPE_ARRAY, "s");
+
+	if (rc < 0)
+		goto out;
+
+	while ((rc = sd_bus_message_read_basic(reply, SD_BUS_TYPE_STRING, &env_entry)) > 0) {
+		char **env_tuple;
+
+		env_tuple = strv_split(env_entry, "=");
+
+		if (!env_tuple)
+			continue;
+
+		if (env_tuple[0] && env_tuple[1])
+			xsetenv(env_tuple[0], env_tuple[1], 0);
+
+		strv_free (env_tuple);
+	}
+	sd_bus_message_exit_container(reply);
+
+out:
+	sd_bus_error_free(&error);
+	reply = sd_bus_message_unref(reply);
+	bus = sd_bus_unref(bus);
+
+	if (euid_changed)
+		seteuid(old_euid);
+}
+#endif
+
 /*
  * Initialize $TERM, $HOME, ...
  */
@@ -1069,6 +1150,10 @@ static void init_environ(struct login_context *cxt)
 	env = pam_getenvlist(cxt->pamh);
 	for (i = 0; env && env[i]; i++)
 		putenv(env[i]);
+
+#ifdef HAVE_LIBSYSTEMD
+	import_systemd_user_environ(cxt);
+#endif
 }
 
 /*

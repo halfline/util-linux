@@ -43,6 +43,7 @@ login_SOURCES = \
 	login-utils/login.c \
 	login-utils/logindefs.c \
 	login-utils/logindefs.h
+login_CFLAGS =
 login_LDADD = $(LDADD) libcommon.la -lpam
 if HAVE_LINUXPAM
 login_LDADD += -lpam_misc
@@ -52,6 +53,10 @@ login_LDADD += -laudit
 endif
 if HAVE_SELINUX
 login_LDADD += -lselinux
+endif
+if HAVE_SYSTEMD
+login_LDADD += $(SYSTEMD_LIBS)
+login_CFLAGS += $(SYSTEMD_CFLAGS)
 endif
 endif # BUILD_LOGIN
 
